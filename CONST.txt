@@ -1,0 +1,4 @@
+DIRECTORY_NAME_1 LAYER_NAME_1, DIRECTORY_NAME_2 LAYER_NAME_2	# Do not erase this line
+cercle 1.png, square 1.png
+BASE_LAYER blue.png, square 3.png
+square 4.png, cercle 6.png
