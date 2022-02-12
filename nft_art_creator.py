@@ -1,14 +1,15 @@
 from aifc import Error
-import os
-import hashlib
-from PIL import Image
-import random
-import sys
 from datetime import datetime
+import hashlib
 import itertools
+import json
+import os
+from PIL import Image
+from random import shuffle
 import sqlite3
 from sqlite3.dbapi2 import IntegrityError
-import json
+import sys
+import time
 
 
 
@@ -98,7 +99,6 @@ def db_insert(dbPath, data):
 
 
 def layer_root(BASE_PATH):
-    BASE_PATH = './LAYERS'
     lPaths = {}
     i = 0
     for path, dirs, files in os.walk(BASE_PATH):
@@ -175,9 +175,95 @@ def apply_const(poss, const):
 
     for possibility in poss:
         if possibility not in possToRemove:
-             possFiltered.append(possibility)
+            possFiltered.append(possibility)
 
     return possFiltered
+
+
+def rarity_file_create(force):
+        if os.path.exists('rarity.json') and not force:
+            return
+
+        BASE_PATH = './LAYERS'
+        lPaths = layer_root(BASE_PATH)
+        freq = {}
+        for root in lPaths:
+            nbLayers = 0
+            for imgLayer in os.listdir(lPaths[root]):
+                if imgLayer.endswith('.png'):
+                    nbLayers = nbLayers + 1
+
+            freq[lPaths[root][2:]] = float(1 / nbLayers)
+
+        layers = {}
+        for root in lPaths:
+            layer = {}
+            for imgLayer in os.listdir(lPaths[root]):
+                if imgLayer.endswith('.png'):
+                    layer[imgLayer] = freq[lPaths[root][2:]]
+
+            layers[str(lPaths[root][2:]).split('/')[-1]] = layer
+
+        jsonString = json.dumps(layers, indent=4)
+        jsonFile = open("rarity.json", "w")
+        jsonFile.write(jsonString)
+        jsonFile.close()
+
+
+def rarity_verify():
+    BASE_PATH = './LAYERS'
+    lPaths = layer_root(BASE_PATH)
+    fileObject = open("rarity.json", "r")
+    jsonContent = fileObject.read()
+    rarity = json.loads(jsonContent)
+
+    for root in lPaths:
+        layer = str(lPaths[root]).split('/')[-1]
+
+        if round(sum(rarity[layer].values()), 2) != 1:
+            print('ERROR: The rarity sum of {layer} is not equal to 1!'.format(layer=layer))
+            sys.exit()
+
+
+def get_rarity():
+    fileObject = open("rarity.json", "r")
+    jsonContent = fileObject.read()
+    return json.loads(jsonContent)
+
+
+def get_nb_rarity(nbPossTo):
+    layersRarity = get_rarity()
+    layersNb = {}
+    for layer in layersRarity:
+        layerNb = {}
+        for layerName in layersRarity[layer]:
+            nb = round(float(layersRarity[layer][layerName]) * int(nbPossTo))
+            layerNb[layerName] = nb
+
+        while sum(layerNb.values()) - int(nbPossTo) != 0:
+            if 0 in layerNb.values():
+                for key, value in layerNb.items():
+                    if value == 0:
+                        layerNb[key] = value + 1
+                        break
+
+            if sum(layerNb.values()) - int(nbPossTo) > 0:
+                maxVal = max(layerNb.values())
+                for key, value in layerNb.items():
+                    if value == maxVal:
+                        layerNb[key] = value - 1
+                        break
+
+            elif sum(layerNb.values()) - int(nbPossTo) < 0:
+                minVal = min(layerNb.values())
+                for key, value in layerNb.items():
+                    if value == minVal:
+                        layerNb[key] = value + 1
+                        break
+
+        layersNb[layer] = layerNb
+
+    return layersNb
 
 
 def trim(possFrom, nbPossTo):
@@ -185,26 +271,78 @@ def trim(possFrom, nbPossTo):
         if int(nbPossTo) > len(possFrom):
             raise OverflowError
 
-        indexToAdd = []
-        i = 0
-        while i < int(nbPossTo):
-            rnd = random.randint(0, len(possFrom) - 1)
-            if rnd not in indexToAdd:
-                indexToAdd.append(rnd)
-                i = i + 1
+        elif int(nbPossTo) < 20:
+            raise ValueError
 
         possTrimmed = []
-        for index in indexToAdd:
-            possTrimmed.append(possFrom[index])
+        possDiscarted = []
+        tmpPossTrimmed = []
+        tmpPossDiscarted = []
 
-        return possTrimmed
+        i = 0
+        while len(possTrimmed) != int(nbPossTo):
+            if i >= 10:
+                break
+
+            possTrimmed = []
+            possDiscarted = []
+
+            layersNb = get_nb_rarity(nbPossTo)
+            shuffle(possFrom)
+
+            for poss in possFrom:
+                isAvailable = True
+                
+                for item in poss:
+                    if layersNb[str(item[0]).split('/')[-1]][item[1]] == 0:
+                        isAvailable = False
+                        break
+
+                if isAvailable:
+                    if poss not in possTrimmed:
+                        possTrimmed.append(poss)
+                    for item in poss:
+                        layersNb[str(item[0]).split('/')[-1]][item[1]] = layersNb[str(item[0]).split('/')[-1]][item[1]] - 1
+
+                else:
+                    possDiscarted.append(poss)
+
+            tmpPossTrimmed.append(possTrimmed)
+            tmpPossDiscarted.append(possDiscarted)
+
+            i = i + 1
+
+        maxPoss = [0, None, None]
+        for i in range(len(tmpPossTrimmed)):
+            length = len(tmpPossTrimmed[i])
+            if length > maxPoss[0]:
+                maxPoss[0] = length
+                maxPoss[1] = tmpPossTrimmed[i]
+                maxPoss[2] = tmpPossDiscarted[i]
+
+        if maxPoss[0] < int(nbPossTo):
+            print('Cannot rapidly find a solution with the current rarity settings')
+            print('You currently have {poss} possibilities registered'.format(poss=maxPoss[0]))
+            diff = int(nbPossTo) - maxPoss[0]
+            userInput = input('Do you want to add {diff} random possibilities to complete the set of {nb}? (Y/N) '.format(nb=nbPossTo, diff=diff)).capitalize()
+
+            if userInput in ['Y', 'YES']:
+                for i in range(int(nbPossTo) - maxPoss[0]):
+                    maxPoss[1].append(maxPoss[2][i])
+
+            else:
+                userInput = input('Do you want to continue to the production? (Y/N) ').capitalize()
+                if userInput not in ['Y', 'YES']:
+                    sys.exit()
+
+        return maxPoss[1]
 
     except OverflowError:
         print('ERROR: The number given ({input}) is more than the number of possibilities!'.format(input=nbPossTo))
         sys.exit()
 
     except ValueError:
-        print('ERROR: ({input}) needs to be a whole number!'.format(input=nbPossTo))
+        print('ERROR: ({input}) needs to be a whole number higher than 20!'.format(input=nbPossTo))
         sys.exit()
 
 
@@ -238,13 +376,13 @@ def img_create(poss, collectionDir):
 
                 if str(layer[0]).endswith('BASE_LAYER'):
                     #Create the base layer
-                    baseLayer = Image.open('{path}/{file}'.format(path=layer[0], file=layer[1]))
+                    baseLayer = Image.open('{path}/{file}'.format(path=layer[0], file=layer[1])).convert('RGBA')
                     isBaseLayer = True
 
             if isBaseLayer:
                 for layer in poss[i]:
                     if not str(layer[0]).endswith('BASE_LAYER'):
-                        foreLayer = Image.open('{path}/{file}'.format(path=layer[0], file=layer[1]))
+                        foreLayer = Image.open('{path}/{file}'.format(path=layer[0], file=layer[1])).convert('RGBA')
                         baseLayer.paste(foreLayer, (0, 0), foreLayer)
 
             else:
@@ -314,25 +452,22 @@ def verify_unique_set(collectionDir):
 
 if __name__ == '__main__':
 
-    # add the possibility of a blank layer!!!***
+    for arg in sys.argv[1:]:
+        if arg == '-f':
+            rarity_file_create(force=True)
 
+    rarity_file_create(force=False)
+    rarity_verify()
     print('Applying Constrains To The Possibilities...')
     poss = img_poss()
     possFiltered = apply_const(poss, read_const())
     print(len(poss) - len(possFiltered), 'Possibilities Has Been Removed')
+    time.sleep(1)
     print(len(possFiltered), 'Possibilities Registered')
-
+    time.sleep(1)
     print('Trimming Possibilities Registered...')
     possTrimmed = trim(possFiltered, sys.argv[1])
-
     print(len(possTrimmed), 'Possibilities Ready For Production')
-
     collectionDir = create_directory()
-
     print('Beginning Production...')
     verify_unique_set(img_create(possTrimmed, collectionDir))
-
-    # metadata_create(possTrimmed, collectionDir)
-
-
-
