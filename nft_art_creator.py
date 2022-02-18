@@ -5,7 +5,8 @@ import itertools
 import json
 import os
 from PIL import Image
-from random import shuffle
+from random import randint, shuffle
+import requests
 import sqlite3
 from sqlite3.dbapi2 import IntegrityError
 import sys
@@ -13,8 +14,10 @@ import time
 
 
 
+BASE_LAYER_PATCH = 'Background'
+
 def db_connection(dbPath):
-    """ create a database connection to a SQLite database """
+    """ Create a database connection to a SQLite database """
     conn = None
     try:
         conn = sqlite3.connect(dbPath)
@@ -26,6 +29,7 @@ def db_connection(dbPath):
 
 
 def db_option():
+    """ Return a string of layers formatted for the database request """
     option = None
     for item in poss[0]:
         layerType = item[0].split('/')[-1]
@@ -40,7 +44,7 @@ def db_option():
 
 
 def create_table(conn):
-    """ create a table from the table statement """
+    """ Create a table from the table statement """
 
     options = 'id integer PRIMARY KEY, ' + db_option()
 
@@ -57,6 +61,7 @@ def create_table(conn):
 
 
 def create_db(dbPath):
+    """ Create a database file into the path directory """
     conn = db_connection(dbPath)
 
     if conn is not None:
@@ -129,6 +134,8 @@ def img_poss():
 
 
 def read_const():
+    # Maybe use # in the file to remove the line to be read!**
+
     constrain_file = open('CONST.txt', "r")
     rFile = constrain_file.read()
     rFile = rFile.replace(',', '')
@@ -233,6 +240,7 @@ def get_rarity():
 
 def get_nb_rarity(nbPossTo):
     layersRarity = get_rarity()
+
     layersNb = {}
     for layer in layersRarity:
         layerNb = {}
@@ -335,6 +343,9 @@ def trim(possFrom, nbPossTo):
                 if userInput not in ['Y', 'YES']:
                     sys.exit()
 
+        # Shake the possibilities to add randomness
+        shuffle(maxPoss[1])
+
         return maxPoss[1]
 
     except OverflowError:
@@ -344,6 +355,129 @@ def trim(possFrom, nbPossTo):
     except ValueError:
         print('ERROR: ({input}) needs to be a whole number higher than 20!'.format(input=nbPossTo))
         sys.exit()
+
+
+def pad_start(val, length):
+    return str(val).rjust(length, '0')
+
+
+def metadata_create(poss, collectionDir, cID):
+    dbPath = '{dir}/metadata.db'.format(dir=collectionDir)
+    collectionPath = '{dir}/collection'.format(dir=collectionDir)
+    metadataPath = '{dir}/metadata'.format(dir=collectionDir)
+    create_db(dbPath)
+
+    for item in poss:
+        data = []
+        for layer in item:
+            data.append(str(layer[1]).replace('.png', ''))
+
+        db_insert(dbPath, data)
+
+    layerRatio = {}
+    options = db_option().replace(' text', '')
+    options = options.split(', ')
+    for option in options:
+        layerRatio[option] = []
+
+        query = '''SELECT {layer}, (1.0 * COUNT(*)) / 
+                  (SELECT COUNT(*) FROM metadata)  AS POURCENTAGE 
+                  FROM metadata GROUP BY {layer};'''.format(layer=option)
+
+        for layer in db_query(dbPath, query):
+            layerImage = [layer[0], layer[1]]
+            layerRatio[option].append(layerImage)
+
+    valid_metadata = ['dna', 'rna', 'name', 'description', 'image', 'timestamp', 'attributes']
+    var_attr = ['Strength', 'Stamina', 'Dexterity', 'Agility', 'Intelligence', 
+                'Emotion', 'Determined', 'Friendly', 'Hard-working', 'Humble', 'Generous', 
+                'Punctual', 'Brave', 'Loyal', 'Perseveres', 'Honest', 'Sincere', 'Kind']
+
+    i = 0
+    for item in os.listdir(collectionPath):
+        if str(item).endswith('.png'):
+            with open('metadata_template.json', 'r') as file:
+                json_data = json.load(file)
+                rarityRatio = 1
+
+                # Add layers as trait_type in the metadata file
+                j = 0
+                lPath = layer_root('./LAYERS')
+                for path in lPath:
+                    traitType = str(lPath[path]).split('/')[-1]
+                    query = '''SELECT {layer} FROM metadata WHERE id={id};'''.format(layer=traitType, id=i+1)
+                    val = str(db_query(dbPath, query)[0][0])
+
+                    for layer in layerRatio[traitType]:
+                        if layer[0] == val:
+                            rarityRatio = float(rarityRatio) * float(layer[1])
+
+                    if traitType == 'BASE_LAYER':
+                        traitType = BASE_LAYER_PATCH   
+
+                    json_data['attributes'].insert(j, {"trait_type": traitType, "value": val})
+                    j = j + 1
+
+                timestamp = int(datetime.timestamp(datetime.now()))
+                life = randint(3, 100)
+                for metadata in json_data:
+                    if metadata not in valid_metadata:
+                        print('ERROR: The metadata attribute ({attr}) is not supported at this time!'.format(attr=metadata))
+                        sys.exit()
+
+                    elif metadata == 'dna':
+                        json_data[metadata] = ''
+
+                    elif metadata == 'rna':
+                        json_data[metadata] = hash_file(collectionPath + '/' + item)
+
+                    elif metadata == 'name':
+                        json_data[metadata] = str(json_data[metadata]) + ' {i}'.format(i=i)
+
+                    elif metadata == 'description':
+                        json_data[metadata] = json_data['name'] + ' has a rarity of ' + '{:.4f}%. '.format(rarityRatio * 100) + json_data[metadata]
+
+                    elif metadata == 'image':
+                        json_data[metadata] = 'ipfs://' + cID + '/{i}.png'.format(i=i)
+
+                    elif metadata == 'timestamp':
+                        json_data[metadata] = timestamp
+
+                    elif metadata == 'attributes':
+                        for attr in json_data[metadata]:
+                            if attr['trait_type'] in var_attr:
+                                attr['value'] = randint(0, 100)
+
+                            elif attr['trait_type'] == 'Life':
+                                attr['value'] = life
+
+                            elif attr['trait_type'] == 'Birthday':
+                                yearTime = 31557600
+                                aging = randint(1, (life - 1))
+                                bdTime = timestamp - (yearTime * aging) + randint(0, yearTime)
+                                attr['value'] = bdTime
+
+            fileName = '{id}.json'.format(id=pad_start(i, 64))
+            with open('{dir}/{file}'.format(dir=metadataPath, file=fileName), 'w') as file:
+                json.dump(json_data, file, indent=2)
+
+            file.close()
+
+            with open('{dir}/{file}'.format(dir=metadataPath, file=fileName), 'r') as file:
+                json_data = json.load(file)
+
+                for metadata in json_data:
+                    if metadata == 'dna':
+                        json_data[metadata] = hash_file(metadataPath + '/' + fileName)
+                        break
+
+            with open('{dir}/{file}.json'.format(dir=metadataPath, file=pad_start(i, 64)), 'w') as file:
+                json.dump(json_data, file, indent=2)
+
+            file.close()
+            i = i + 1
+
+    return collectionDir
 
 
 def create_directory():
@@ -398,14 +532,14 @@ def img_create(poss, collectionDir):
     return collectionDir
 
 
-def hash_image(path):
-    imgHash = hashlib.sha256()
+def hash_file(path):
+    fileHash = hashlib.sha256()
     with open(path,"rb") as f:
         # Read and update hash string value in blocks of 4K
         for block in iter(lambda: f.read(4096),b""):
-            imgHash.update(block)
+            fileHash.update(block)
 
-        return imgHash.hexdigest()
+        return fileHash.hexdigest()
 
 
 def verify_unique_set(collectionDir):
@@ -415,7 +549,7 @@ def verify_unique_set(collectionDir):
         try:
             imgName = "{i}.png".format(i=i)
             imgPath = '{dir}/collection/{img}'.format(dir=collectionDir, img=imgName)
-            imgHash = hash_image(imgPath)
+            imgHash = hash_file(imgPath)
 
             if (imgHash in hashDict):
                 hashDict[imgHash][1] += 1
@@ -450,7 +584,32 @@ def verify_unique_set(collectionDir):
         sys.exit()
 
 
+def ipfs_upload(collectionDir, nbFiles, subdirectory, fileType):
+    files = []
+    for i in range(int(nbFiles)):
+        if fileType == 'json':
+            i = pad_start(i, 64)
+
+        files.append(('file', ('{dir}/{sub}/{i}.{type}'.format(dir=collectionDir, sub=subdirectory, i=i, type=fileType), open('{dir}/{sub}/{i}.{type}'.format(dir=collectionDir, sub=subdirectory, i=i, type=fileType), "rb"))))
+  
+    ipfs_url = "https://ipfs.infura.io:5001/api/v0/add"
+    response = requests.post(url=ipfs_url, files=files)
+
+    if int(response.status_code) == 200:
+        print('Uploaded Successfully to IPFS!')
+        textRaw = response.text.replace('\n', '')
+        dictFormat = textRaw.split('}')[-3]  + '}'
+        jsonURL = json.loads(dictFormat)
+        cID = jsonURL['Hash']
+        return cID
+
+    else:
+        print('ERROR: {response}'.format(response=response.status_code))
+        sys.exit()
+
+
 if __name__ == '__main__':
+    # add the possibility of a blank layer!!!***
 
     for arg in sys.argv[1:]:
         if arg == '-f':
@@ -471,3 +630,33 @@ if __name__ == '__main__':
     collectionDir = create_directory()
     print('Beginning Production...')
     verify_unique_set(img_create(possTrimmed, collectionDir))
+
+    cID = None
+    isIPFS = input('Do you want to upload the collection directory to IPFS? (Y/N) ').capitalize()
+    if isIPFS in ['YES', 'Y']:
+        isAccept = input('By continuing, you are aware and you accept to take all the risks of non pinned data stored to IPFS node services. Do you wish to continue? (Y/N) ').capitalize()
+        if isAccept in ['YES', 'Y']:
+            cID = ipfs_upload(collectionDir, sys.argv[1], 'collection', 'png')
+        else:
+            sys.exit()
+
+    else:
+        cID = input('Please upload your collection directory to an IPFS pinning service and paste the CID of the directory here: ')
+
+    metadata_create(possTrimmed, collectionDir, cID)
+
+    cID = None
+    isIPFS = input('Do you want to upload the metadata directory to IPFS? (Y/N) ').capitalize()
+    if isIPFS in ['YES', 'Y']:
+        isAccept = input('By continuing, you are aware and you accept to take all the risks of non pinned data stored to IPFS node services. Do you wish to continue? (Y/N) ').capitalize()
+        if isAccept in ['YES', 'Y']:
+            cID = ipfs_upload(collectionDir, sys.argv[1], 'metadata', 'json')
+        else:
+            sys.exit()
+
+    else:
+        cID = input('Please upload your metadata directory to an IPFS pinning service and paste the CID of the directory here: ')
+
+    print('Metadata CID:', cID)
+
+    # Create the contract solidity file!!
